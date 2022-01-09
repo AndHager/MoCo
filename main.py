@@ -1,15 +1,19 @@
+from time import sleep
+
 import cv2
 import mediapipe as mp
+from pyautogui import press
 
 
 class PoseDetector:
     mp_pose = mp.solutions.pose
+    pose_landmark = mp_pose.PoseLandmark
     pose = mp_pose.Pose(
         static_image_mode=False,
         model_complexity=2,
         enable_segmentation=True,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5
+        min_detection_confidence=0.4,
+        min_tracking_confidence=0.4
     )
     mp_draw = mp.solutions.drawing_utils
     mp_drawing_styles = mp.solutions.drawing_styles
@@ -18,6 +22,13 @@ class PoseDetector:
 
     knee_to_shoulder_height_left = 0
     knee_to_shoulder_height_right = 0
+
+    shoulder_height_left = 0
+    shoulder_height_right = 0
+
+    ducking_tolerance = 0.175
+    jumping_tolerance = 0.03
+    min_detecting_confidence = 0.4
 
     def detect_pose(self, rgb_image):
         pose = self.pose.process(rgb_image)
@@ -34,6 +45,10 @@ class PoseDetector:
         )
 
     def start_config(self):
+        self.knee_to_shoulder_height_left = 0
+        self.knee_to_shoulder_height_right = 0
+        self.shoulder_height_left = 0
+        self.shoulder_height_right = 0
         self.configure = True
 
     def end_config(self):
@@ -42,23 +57,93 @@ class PoseDetector:
     def is_config(self):
         return self.configure
 
+    def __contains_necessary_body_parts(self, pose):
+        if pose.pose_landmarks:
+
+            right_knee = pose.pose_landmarks.landmark[self.pose_landmark.RIGHT_KNEE].visibility
+            if right_knee < self.min_detecting_confidence:
+                print("Cant see right knee!")
+                return False
+
+            right_shoulder = pose.pose_landmarks.landmark[self.pose_landmark.RIGHT_SHOULDER].visibility
+            if right_shoulder < self.min_detecting_confidence:
+                print("Cant see right shoulder!")
+                return False
+
+            left_knee = pose.pose_landmarks.landmark[self.pose_landmark.LEFT_KNEE].visibility
+            if left_knee < self.min_detecting_confidence:
+                print("Cant see left knee!")
+                return False
+
+            left_shoulder = pose.pose_landmarks.landmark[self.pose_landmark.LEFT_SHOULDER].visibility
+            if left_shoulder < self.min_detecting_confidence:
+                print("Cant see left shoulder!")
+                return False
+            return True
+        return False
+
+    def __get_left_shoulder_height(self, pose):
+        if pose.pose_landmarks:
+            return pose.pose_landmarks.landmark[self.pose_landmark.LEFT_SHOULDER].y
+        return 0
+
+    def __get_right_shoulder_height(self, pose):
+        if pose.pose_landmarks:
+            return pose.pose_landmarks.landmark[self.pose_landmark.RIGHT_SHOULDER].y
+        return 0
+
+    def __get_left_height(self, pose):
+        if pose.pose_landmarks:
+            left_knee = pose.pose_landmarks.landmark[self.pose_landmark.LEFT_KNEE].y
+            left_shoulder = self.__get_left_shoulder_height(pose)
+            return abs(left_shoulder - left_knee)
+        return 0
+
+    def __get_right_height(self, pose):
+        if pose.pose_landmarks:
+            right_knee = pose.pose_landmarks.landmark[self.pose_landmark.RIGHT_KNEE].y
+            right_shoulder = self.__get_right_shoulder_height(pose)
+            return abs(right_shoulder - right_knee)
+        return 0
+
     def __config(self, pose):
         print("pose:")
-        print(pose.pose_landmarks)
-        exit(0)
+        # print(pose.pose_landmarks)
+        if pose.pose_landmarks and self.__contains_necessary_body_parts(pose):
+            left_height = self.__get_left_height(pose)
+            self.knee_to_shoulder_height_left = max(self.knee_to_shoulder_height_left, left_height)
 
-        knee_to_shoulder_height_left = 0
-        knee_to_shoulder_height_right = 0
+            right_height = self.__get_right_height(pose)
+            self.knee_to_shoulder_height_right = max(self.knee_to_shoulder_height_right, right_height)
 
-        print(self.knee_to_shoulder_height_left)
-        print(self.knee_to_shoulder_height_right)
+            left_shoulder = self.__get_left_shoulder_height(pose)
+            self.shoulder_height_left = max(self.shoulder_height_left, left_shoulder)
+            right_shoulder = self.__get_right_shoulder_height(pose)
+            self.shoulder_height_right = max(self.shoulder_height_right, right_shoulder)
 
-    def is_ducking(self, pos):
-        # pos.pose_landmarks[]
-        return True
+            print(self.knee_to_shoulder_height_left)
+            print(self.knee_to_shoulder_height_right)
+            print(self.shoulder_height_left)
+            print(self.shoulder_height_right)
 
-    def is_jumping(self, pos):
-        return True
+    def is_ducking(self, pose):
+        if pose.pose_landmarks and self.__contains_necessary_body_parts(pose):
+            left_height = self.__get_left_height(pose)
+            right_height = self.__get_right_height(pose)
+
+            return (not self.is_jumping(pose)) \
+                   and self.knee_to_shoulder_height_left > left_height + self.ducking_tolerance \
+                   and self.knee_to_shoulder_height_right > right_height + self.ducking_tolerance
+        return False
+
+    def is_jumping(self, pose):
+        if pose.pose_landmarks and self.__contains_necessary_body_parts(pose):
+            left_shoulder = self.__get_left_shoulder_height(pose)
+            right_shoulder = self.__get_right_shoulder_height(pose)
+
+            return self.shoulder_height_left > left_shoulder + self.jumping_tolerance \
+                   and self.shoulder_height_right > right_shoulder + self.jumping_tolerance
+        return False
 
 
 class FaceDetector:
@@ -135,6 +220,9 @@ def capture_video():
     face_detector = FaceDetector()
     pose_detector = PoseDetector()
 
+    ducking_counter = 0
+    jumping_counter = 0
+    sleep(3)
     while True:
         check, frame = video.read()
         rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -145,14 +233,22 @@ def capture_video():
         faces = face_detector.detect_face(rgb_image)
         face_detector.draw_face_landmarks(frame, faces)
 
-        pos = pose_detector.detect_pose(rgb_image)
-        pose_detector.draw_pose_landmarks(frame, pos)
+        pose = pose_detector.detect_pose(rgb_image)
+        pose_detector.draw_pose_landmarks(frame, pose)
 
-        if pose_detector.is_config():
-            pass
+        if not pose_detector.is_config():
+            if pose_detector.is_ducking(pose):
+                press('down')
+                print(f"{ducking_counter} You are ducking")
+
+                ducking_counter += 1
+            if pose_detector.is_jumping(pose):
+                press('up')
+                print(f"{jumping_counter} You are jumping")
+                jumping_counter += 1
 
         cv2.imshow("Color Frame", frame)
-        key = cv2.waitKey(1)
+        key = cv2.waitKey(100)
         if key == ord('s'):
             pose_detector.start_config()
         if key == ord('e'):
